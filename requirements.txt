@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+httpx
+sqlmodel
+SQLAlchemy==1.4.47
+asyncpg
+python-dotenv
+discord.py>=2.2.0
+python-multipart
