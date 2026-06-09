@@ -25,6 +25,7 @@ TICKET_REASONS = [
 
 
 async def generate_transcript_html(channel: discord.TextChannel) -> str:
+    """Generates an HTML transcript from a given text channel."""
     messages = []
     async for msg in channel.history(limit=None, oldest_first=True):
         messages.append(msg)
@@ -42,15 +43,14 @@ async def generate_transcript_html(channel: discord.TextChannel) -> str:
         content = html.escape(msg.content)
         parts.append(f'<div class="msg"><div class="author">{author} <span class="time">[{ts}]</span></div><div class="content">{content}</div>')
 
-       
-        for at in msg.attachments:
-            parts.append(f'<div class="attachment"><a href="{at.url}" target="_blank">Attachment: {html.escape(at.filename)}</a></div>')
+        for attachment in msg.attachments:
+            parts.append(f'<div class="attachment"><a href="{attachment.url}" target="_blank">Attachment: {html.escape(attachment.filename)}</a></div>')
 
         
-        for e in msg.embeds:
+        for embed_item in msg.embeds:
             try:
-                title = html.escape(e.title) if e.title else ''
-                desc = html.escape(e.description) if e.description else ''
+                title = html.escape(embed_item.title) if embed_item.title else ''
+                desc = html.escape(embed_item.description) if embed_item.description else ''
                 if title or desc:
                     parts.append(f'<div class="embed">Embed: <strong>{title}</strong><div>{desc}</div></div>')
             except Exception:
@@ -226,19 +226,19 @@ class TicketCog(commands.Cog):
       
         try:
             html_text = await generate_transcript_html(channel)
-            b = io.BytesIO(html_text.encode('utf-8'))
+            html_bytes_io = io.BytesIO(html_text.encode('utf-8'))
             filename = f"{channel.name}-transcript.html"
-            file = discord.File(fp=b, filename=filename)
+            file = discord.File(fp=html_bytes_io, filename=filename)
 
          
             if STAFF_LOG_CHANNEL_ID and STAFF_LOG_CHANNEL_ID != 0:
-                log_ch = self.bot.get_channel(STAFF_LOG_CHANNEL_ID)
-                if log_ch:
+                log_channel = self.bot.get_channel(STAFF_LOG_CHANNEL_ID)
+                if log_channel:
                     embed = discord.Embed(title="Ticket Closed", 
-                                          description=f"Channel: {channel.mention}"
+                                          description=f"Channel: {channel.mention}\n"
                                                     f"Closed by: {interaction.user.mention}", 
                                                     color=0xff5555, timestamp=datetime.utcnow())
-                    await log_ch.send(embed=embed, file=file)
+                    await log_channel.send(embed=embed, file=file)
 
         except Exception as e:
             print('Error generating transcript:', e)

@@ -9,12 +9,13 @@ from discord_client import client
 
 import time
 
-
+from discord_client import ready_event
 
 start_time = time.time()
 
 @event_handler.mc_webhook("server_start")
 async def server_start(data):
+    await ready_event.wait()
     await track_player_count()
 
 

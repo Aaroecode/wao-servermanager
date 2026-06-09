@@ -40,7 +40,7 @@ class DBService:
         self.backup_interval = backup_interval_sec
 
         # Threading / queue
-        self._q: queue.Queue[_Request] = queue.Queue()
+        self._queue: queue.Queue[_Request] = queue.Queue()
         self._thread: Optional[threading.Thread] = None
         self._running = False
 
@@ -60,14 +60,14 @@ class DBService:
     #                 PUBLIC ASYNC METHODS
     # -------------------------------------------------------
     async def insert(self, table: str, data: Dict[str, Any]) -> int:
-        fut = asyncio.get_running_loop().create_future()
-        self._q.put(("insert", {"table": table, "data": data}, fut))
-        return await fut
+        future = asyncio.get_running_loop().create_future()
+        self._queue.put(("insert", {"table": table, "data": data}, future))
+        return await future
 
     async def update(self, table: str, where: Dict[str, Any], updates: Dict[str, Any]) -> int:
-        fut = asyncio.get_running_loop().create_future()
-        self._q.put(("update", {"table": table, "filters": where, "updates": updates}, fut))
-        return await fut
+        future = asyncio.get_running_loop().create_future()
+        self._queue.put(("update", {"table": table, "filters": where, "updates": updates}, future))
+        return await future
 
     async def select(
         self,
@@ -76,8 +76,8 @@ class DBService:
         limit: Optional[int] = None,
         order_by: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        fut = asyncio.get_running_loop().create_future()
-        self._q.put((
+        future = asyncio.get_running_loop().create_future()
+        self._queue.put((
             "select",
             {
                 "table": table,
@@ -85,19 +85,19 @@ class DBService:
                 "limit": limit,
                 "order_by": order_by
             },
-            fut
+            future
         ))
-        return await fut
+        return await future
 
     async def delete(self, table: str, filters: Dict[str, Any]) -> int:
-        fut = asyncio.get_running_loop().create_future()
-        self._q.put(("delete", {"table": table, "filters": filters}, fut))
-        return await fut
+        future = asyncio.get_running_loop().create_future()
+        self._queue.put(("delete", {"table": table, "filters": filters}, future))
+        return await future
 
     async def raw(self, sql: str, params: Optional[Tuple[Any, ...]] = None) -> Any:
-        fut = asyncio.get_running_loop().create_future()
-        self._q.put(("raw", {"sql": sql, "params": params}, fut))
-        return await fut
+        future = asyncio.get_running_loop().create_future()
+        self._queue.put(("raw", {"sql": sql, "params": params}, future))
+        return await future
 
     # -------------------------------------------------------
     #                WORKER THREAD CONTROL
@@ -132,13 +132,16 @@ class DBService:
         self._running = False
 
         # Wake the worker with a shutdown request
-        self._q.put(("shutdown", {}, None))
+        self._queue.put(("shutdown", {}, None))
 
         if self._thread:
             self._thread.join(timeout=5)
 
     def _worker_loop(self):
-        """Runs inside the worker thread."""
+        """
+        Runs inside the worker thread.
+        Initializes the SQLite connection and processes database operations from the queue sequentially.
+        """
 
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -157,7 +160,7 @@ class DBService:
 
         while self._running:
             try:
-                op_name, params, fut = self._q.get(timeout=0.5)
+                op_name, params, future = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
 
@@ -183,48 +186,48 @@ class DBService:
                 else:
                     result = None
 
-                if fut:
+                if future:
                     try:
-                        target_loop = fut.get_loop() 
+                        target_loop = future.get_loop() 
                     except Exception:
-                        target_loop = getattr(fut, "_loop", None)
+                        target_loop = getattr(future, "_loop", None)
 
                     if target_loop:
                         try:
-                            target_loop.call_soon_threadsafe(fut.set_result, result)
+                            target_loop.call_soon_threadsafe(future.set_result, result)
                         except Exception as e:
                             try:
-                                fut.cancel()
+                                future.cancel()
                             except Exception:
                                 pass
                             print("DB worker: failed to set_result on target loop:", e)
                     else:
                         try:
-                            fut.cancel()
+                            future.cancel()
                         except Exception:
                             pass
                         print("DB worker: no target loop found for future; cancelled future.")
 
 
             except Exception as e:
-                if fut:
+                if future:
                     try:
-                        target_loop = fut.get_loop()
+                        target_loop = future.get_loop()
                     except Exception:
-                        target_loop = getattr(fut, "_loop", None)
+                        target_loop = getattr(future, "_loop", None)
 
                     if target_loop:
                         try:
-                            target_loop.call_soon_threadsafe(fut.set_exception, e)
+                            target_loop.call_soon_threadsafe(future.set_exception, e)
                         except Exception as inner_e:
                             try:
-                                fut.cancel()
+                                future.cancel()
                             except Exception:
                                 pass
                             print("DB worker: failed to set_exception on target loop:", inner_e)
                     else:
                         try:
-                            fut.cancel()
+                            future.cancel()
                         except Exception:
                             pass
                         print("DB worker exception (no target loop):", e)
@@ -241,6 +244,7 @@ class DBService:
     #               AUTO SCHEMA / MIGRATION
     # -------------------------------------------------------
     def _ensure_schema(self):
+        """Creates tables and auto-adds missing columns based on SCHEMA."""
         cur = self._conn.cursor()
 
         for table, columns in SCHEMA.items():
@@ -264,7 +268,7 @@ class DBService:
     #             INTERNAL DB OPERATIONS
     # -------------------------------------------------------
     def _normalize_for_db(self, table: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Serialize JSON columns automatically."""
+        """Serialize JSON columns automatically before database insertion or update."""
         result = {}
         json_cols = self.json_columns.get(table, set())
 
@@ -277,6 +281,7 @@ class DBService:
         return result
 
     def _row_to_dict(self, table: str, row: sqlite3.Row) -> Dict[str, Any]:
+        """Convert a sqlite3.Row into a dict, automatically deserializing JSON columns."""
         d = dict(row)
         json_cols = self.json_columns.get(table, set())
 
@@ -290,6 +295,7 @@ class DBService:
 
     # Insert
     def _do_insert(self, table: str, data: Dict[str, Any]) -> int:
+        """Executes an INSERT operation and returns the last inserted row ID."""
         data = self._normalize_for_db(table, data)
         keys = list(data.keys())
 
@@ -301,6 +307,7 @@ class DBService:
 
     # Filters to WHERE
     def _filters(self, filters: Dict[str, Any]):
+        """Builds a WHERE clause and parameters list based on provided filters."""
         if not filters:
             return "", []
 
@@ -317,6 +324,7 @@ class DBService:
 
     # Update
     def _do_update(self, table: str, filters: Dict[str, Any], updates: Dict[str, Any]) -> int:
+        """Executes an UPDATE operation based on filters and returns the number of affected rows."""
         updates = self._normalize_for_db(table, updates)
         set_expr = ", ".join(f"{k} = ?" for k in updates.keys())
 
@@ -331,6 +339,7 @@ class DBService:
 
     # Select
     def _do_select(self, table: str, filters: Dict[str, Any], limit: int, order_by: str):
+        """Executes a SELECT operation and returns a list of dictionaries."""
         where_clause, params = self._filters(filters)
         sql = f"SELECT * FROM {table} {where_clause}"
 
@@ -347,6 +356,7 @@ class DBService:
 
     # Delete
     def _do_delete(self, table: str, filters: Dict[str, Any]) -> int:
+        """Executes a DELETE operation based on filters and returns the number of affected rows."""
         where_clause, params = self._filters(filters)
         cur = self._conn.cursor()
         cur.execute(f"DELETE FROM {table} {where_clause}", tuple(params))
@@ -355,6 +365,7 @@ class DBService:
 
     # Raw SQL
     def _do_raw(self, sql: str, params: Optional[Tuple[Any, ...]]):
+        """Executes a raw SQL statement, returning rows if applicable."""
         cur = self._conn.cursor()
         if params:
             cur.execute(sql, params)
@@ -372,6 +383,7 @@ class DBService:
     #                  BACKUP LOOP
     # -------------------------------------------------------
     def _backup_loop(self):
+        """Background thread to perform automated database backups periodically."""
         while self._running:
             try:
                 ts = time.strftime("%Y%m%d_%H%M%S")

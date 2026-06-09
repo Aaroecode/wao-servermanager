@@ -91,8 +91,8 @@ class AdvancedAsyncRCON:
         self._connection_task = asyncio.create_task(self._connection_loop())
         # workers handle commands sequentially; we keep worker_count but each worker still awaits lock before send
         for i in range(self.worker_count):
-            t = asyncio.create_task(self._worker_loop(i))
-            self._worker_tasks.append(t)
+            worker_task = asyncio.create_task(self._worker_loop(i))
+            self._worker_tasks.append(worker_task)
         logger.info("AdvancedAsyncRCON started")
 
     async def stop(self):
@@ -101,8 +101,8 @@ class AdvancedAsyncRCON:
         # cancel tasks
         if self._connection_task:
             self._connection_task.cancel()
-        for t in self._worker_tasks:
-            t.cancel()
+        for worker_task in self._worker_tasks:
+            worker_task.cancel()
         self._worker_tasks.clear()
         # close writer
         if self._writer:
@@ -129,10 +129,10 @@ class AdvancedAsyncRCON:
             retries = self.max_retries
         
         
-        fut = asyncio.get_running_loop().create_future()
-        queued = _QueuedCommand(command=command, future=fut, retries_left=retries, timeout=timeout)
+        result_future = asyncio.get_running_loop().create_future()
+        queued = _QueuedCommand(command=command, future=result_future, retries_left=retries, timeout=timeout)
         await self._queue.put(queued)
-        return await asyncio.wait_for(fut, timeout=(timeout + 10))  # total wait (command timeout + slack)
+        return await asyncio.wait_for(result_future, timeout=(timeout + 10))  # total wait (command timeout + slack)
 
     async def run_batch(self, commands: List[str], *, timeout: Optional[float] = None, retries: Optional[int] = None) -> List[str]:
         """
@@ -146,15 +146,15 @@ class AdvancedAsyncRCON:
 
         futures = []
         for cmd in commands:
-            fut = asyncio.get_running_loop().create_future()
-            queued = _QueuedCommand(command=cmd, future=fut, retries_left=retries, timeout=timeout)
+            result_future = asyncio.get_running_loop().create_future()
+            queued = _QueuedCommand(command=cmd, future=result_future, retries_left=retries, timeout=timeout)
             await self._queue.put(queued)
-            futures.append(fut)
+            futures.append(result_future)
 
         # wait for all
         results = []
-        for fut in futures:
-            res = await asyncio.wait_for(fut, timeout=(timeout + 10))
+        for result_future in futures:
+            res = await asyncio.wait_for(result_future, timeout=(timeout + 10))
             results.append(res)
         return results
 
@@ -322,8 +322,13 @@ class AdvancedAsyncRCON:
             if not self._connected or self._writer is None or self._reader is None:
                 raise RuntimeError("RCON not connected")
 
-            # create packet: [size][id][type][payload][2xNULL]
-            # request id: use monotonic timestamp truncated to int for uniqueness
+            # Create RCON packet
+            # Format:
+            # 1. Length (4 bytes, little-endian) - Length of the rest of the packet
+            # 2. Request ID (4 bytes, little-endian) - Unique ID for matching response
+            # 3. Type (4 bytes, little-endian) - 3 for Auth, 2 for Command, 0 for Response
+            # 4. Payload (Null-terminated ASCII/UTF-8 string)
+            # 5. Padding (1 byte null pad)
             request_id = int(time.time() * 1000) & 0x7fffffff
             payload_bytes = payload.encode("utf-8")
             packet_len = 4 + 4 + len(payload_bytes) + 2  # id(4) + type(4) + payload + 2 nulls
